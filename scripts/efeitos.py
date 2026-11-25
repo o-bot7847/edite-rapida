@@ -143,7 +143,7 @@ def capitulo(c, e, a, b):
 def selo(c, e, a, b):
     txt = esc(e.get("texto", ""))
     y = int(e.get("y", 0)) or max(320, c.ly - 125)
-    fs = 42
+    fs = 42 if larg(txt, 42) + 110 <= 700 else max(30, int(590 / max(1, len(txt) * 0.56)))
     w = larg(txt, fs) + 110
     cc, _ = cor(c.cor)
     c.add(8, a, b, rf"{{\an5\pos(540,{y})\p1\bord0\shad0\1c&H141414&\1a&H30&\fad(150,200)}}{caixa(w, 78, 39)}")

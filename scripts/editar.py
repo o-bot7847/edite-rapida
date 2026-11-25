@@ -310,10 +310,13 @@ def montar(pasta=None):
         for a0, b0, d0 in c.descer:
             if a0 <= ini <= b0:
                 y = min(1400, ly + d0 // 2)
+        # zona segura do Reels: a palavra cabe entre x 180 e 900 (botoes de curtir na direita)
         if limpa(t) in dest:
-            estilo = rf"{{\an5\pos(540,{y})\fnInstrument Serif\i1\fs{int(tam * 1.3)}\c{cc}\bord5\shad3{pop}}}"
+            fs = min(int(tam * 1.3), int(720 / max(1, len(txt) * 0.47)))
+            estilo = rf"{{\an5\pos(540,{y})\fnInstrument Serif\i1\fs{fs}\c{cc}\bord5\shad3{pop}}}"
         else:
-            estilo = rf"{{\an5\pos(540,{y})\fnInter\b1\fs{tam}\c&HFFFFFF&\bord5\shad3{pop}}}"
+            fs = min(tam, int(720 / max(1, len(txt) * 0.6)))
+            estilo = rf"{{\an5\pos(540,{y})\fnInter\b1\fs{fs}\c&HFFFFFF&\bord5\shad3{pop}}}"
         c.add(1, ini, fim, estilo + txt)
 
     cab = f"""[Script Info]
