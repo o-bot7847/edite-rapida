@@ -5,11 +5,12 @@ Duas etapas:
   python3 editar.py preparar [video] [pasta]   -> transcreve e tira fotos do video
   python3 editar.py montar [pasta]             -> le plano.json e entrega o MP4 pronto
 
-O que o video final recebe (o "arroz com feijao"):
+O que o video final recebe:
   - corte das pausas (sem cortar palavra), num video so
   - titulo-gancho nos primeiros segundos
   - legenda de 1 palavra por vez, com as palavras fortes em destaque
-  - zoom seco nas frases fortes
+  - efeitos escolhidos pelo plano (numero gigante, capitulo, topicos, lista riscada,
+    mensagens, tela cheia, congelar, glitch, zoom, bilhete, fechamento...) com sons
   - volume no padrao do Reels (-14 LUFS)
 So precisa de Python e ffmpeg. Instala o que faltar sozinho.
 """
@@ -148,7 +149,7 @@ def preparar(video_arg=None, pasta=None):
     regua = ",".join(
         f"drawbox=y={y}:x=0:w={W}:h=4:color=yellow@0.9:t=fill,"
         f"drawtext=fontfile='{fonte}':text='{y}':x=12:y={y - 46}:fontsize=40:fontcolor=yellow:borderw=3"
-        for y in (1000, 1200, 1400))
+        for y in (400, 600, 800, 1000, 1200, 1400))
     fotos = []
     for i, frac in enumerate((0.2, 0.5, 0.8), 1):
         f = os.path.join(pasta, f"foto-{i}.jpg")
@@ -208,34 +209,18 @@ def limpa(p):
     return re.sub(r"[^\wà-ÿ]", "", p.lower())
 
 
-def cor_ass(hexcor):
-    h = hexcor.lstrip("#")
-    return f"&H00{h[4:6]}{h[2:4]}{h[0:2]}".upper()
+def uniao(intervalos):
+    return "+".join(f"between(t,{a:.2f},{b:.2f})" for a, b in intervalos) or "0"
 
 
-def esc(t):
-    return t.replace("\\", "").replace("{", "(").replace("}", ")")
-
-
-def quebrar(texto, maximo):
-    linhas, atual = [], ""
-    for w in texto.split():
-        if atual and len(atual) + 1 + len(w) > maximo:
-            linhas.append(atual)
-            atual = w
-        else:
-            atual = (atual + " " + w).strip()
-    if atual:
-        linhas.append(atual)
-    return linhas
-
-
-def tempo_ass(t):
-    t = max(0, t)
-    return f"{int(t // 3600)}:{int(t % 3600 // 60):02d}:{t % 60:05.2f}"
+def dentro(t, intervalos):
+    return any(a - 0.05 <= t <= b for a, b in intervalos)
 
 
 def montar(pasta=None):
+    sys.path.insert(0, AQUI)
+    import efeitos as fx
+    import sons as sn
     pasta = os.path.abspath(pasta or max(glob.glob(os.path.expanduser("~/edite-rapida/*/")), key=os.path.getmtime))
     ff = achar_ffmpeg()
     info = json.load(open(os.path.join(pasta, "info.json")))
@@ -246,7 +231,6 @@ def montar(pasta=None):
     if not os.path.exists(video):
         pare("SEM_VIDEO", "o video sumiu da pasta. Peca pra anexar de novo.")
 
-    # correcoes de transcricao
     corr = {limpa(k): v for k, v in (plano.get("correcoes") or {}).items()}
     palavras = [[corr.get(limpa(t), t), s, e] for t, s, e in palavras]
 
@@ -280,39 +264,57 @@ def montar(pasta=None):
             acc += y - x
         return acc / vel
 
-    # 2. legenda (arquivo .ass)
-    cor = cor_ass(plano.get("cor", "#FFF3C6"))
-    ly = int(plano.get("legenda_y", 1250))
-    ly = min(max(ly, 900), 1400)
-    tam = int(plano.get("legenda_tamanho", 108))
-    dest = {limpa(d) for d in plano.get("destaques", [])}
-    ev = []
-    pop = r"\fscx82\fscy82\t(0,90,\fscx106\fscy106)\t(90,170,\fscx100\fscy100)"
-    for i, (t, s, e) in enumerate(palavras):
-        ini = novo(s) - 0.05
-        prox = novo(palavras[i + 1][1]) - 0.05 if i + 1 < len(palavras) else novo(e) + 0.5
-        fim = min(prox, novo(e) + 0.6)
-        if fim - ini < 0.1:
-            fim = ini + 0.1
-        txt = esc(re.sub(r"^[\"'(]+|[\"'),.;:!…]+$", "", t))
-        if not txt:
-            continue
-        if limpa(t) in dest:
-            estilo = rf"{{\an5\pos(540,{ly})\fnInstrument Serif\i1\fs{int(tam * 1.3)}\c{cor}{pop}}}"
-        else:
-            estilo = rf"{{\an5\pos(540,{ly})\fnInter\b1\fs{tam}{pop}}}"
-        ev.append(f"Dialogue: 1,{tempo_ass(ini)},{tempo_ass(fim)},Leg,,0,0,0,,{estilo}{txt}")
+    cor_dest = plano.get("cor", fx.CREME)
+    ly = min(max(int(plano.get("legenda_y", 1250)), 900), 1400)
+    c = fx.Ctx(novo, final, cor_dest, ly, int(plano.get("descer_cartoes", 0)))
 
+    # 2. efeitos
+    efs = list(plano.get("efeitos", []))
+    for z in plano.get("zooms", []):  # formato antigo
+        t0 = float(z[0] if isinstance(z, list) else z)
+        d0 = float(z[1]) if isinstance(z, list) and len(z) > 1 else 1.3
+        efs.append({"tipo": "zoom", "t": t0, "fim": t0 + d0})
+    for e in sorted(efs, key=lambda x: float(x.get("t", 0))):
+        try:
+            fx.aplicar(c, e, float(e.get("t", 0)))
+        except Exception as erro:  # noqa: BLE001
+            c.avisos.append(f"efeito {e.get('tipo')} em {e.get('t')}s deu erro ({erro}): pulei")
+
+    # 3. titulo-gancho
+    cc, _ = fx.cor(cor_dest)
     tit = plano.get("titulo") or {}
     if tit.get("grande"):
         tfim = min(float(tit.get("fim", 3.5)), final)
-        partes = []
-        for ln in quebrar(tit.get("pequeno", ""), 28):
-            partes.append(rf"{{\fnInter\b1\fs58\c&H00FFFFFF&}}{esc(ln)}")
-        for ln in quebrar(tit["grande"], 13):
-            partes.append(rf"{{\fnPlayfair Display\b1\fs120\c{cor}}}{esc(ln)}")
-        ev.insert(0, f"Dialogue: 2,{tempo_ass(0)},{tempo_ass(tfim)},Tit,,0,0,0,,"
-                     + rf"{{\an8\pos(540,330)\fad(120,250)}}" + r"\N".join(partes))
+        partes = [rf"{{\fnInter\b1\fs58\c&HFFFFFF&}}{fx.esc(x)}" for x in fx.quebrar(tit.get("pequeno", ""), 28)]
+        partes += [rf"{{\fnPlayfair Display\b1\fs120\c{cc}}}{fx.esc(x)}" for x in fx.quebrar(tit["grande"], 13)]
+        c.add(4, 0, tfim, rf"{{\an8\pos(540,330)\bord5\shad4\3c&H101010&\4a&H60&\fad(0,250)}}" + r"\N".join(partes))
+        c.som(0.05, "whoosh")
+
+    # 4. legenda (1 palavra por vez)
+    tam = int(plano.get("legenda_tamanho", 108))
+    dest = {limpa(d) for d in plano.get("destaques", [])}
+    pop = r"\fscx82\fscy82\t(0,90,\fscx106\fscy106)\t(90,170,\fscx100\fscy100)"
+    for i, (t, s, e) in enumerate(palavras):
+        ini = novo(s) - 0.08
+        prox = novo(palavras[i + 1][1]) - 0.08 if i + 1 < len(palavras) else novo(e) + 0.5
+        fim = max(ini + 0.1, min(prox, novo(e) + 0.6))
+        if dentro(ini + 0.05, c.sem_legenda):
+            continue
+        for a0, b0 in c.sem_legenda:
+            if ini < a0 < fim:
+                fim = a0
+        txt = fx.esc(re.sub(r"^[\"'(]+|[\"'),.;:!…]+$", "", t))
+        if not txt:
+            continue
+        y = ly
+        for a0, b0, d0 in c.descer:
+            if a0 <= ini <= b0:
+                y = min(1400, ly + d0 // 2)
+        if limpa(t) in dest:
+            estilo = rf"{{\an5\pos(540,{y})\fnInstrument Serif\i1\fs{int(tam * 1.3)}\c{cc}\bord5\shad3{pop}}}"
+        else:
+            estilo = rf"{{\an5\pos(540,{y})\fnInter\b1\fs{tam}\c&HFFFFFF&\bord5\shad3{pop}}}"
+        c.add(1, ini, fim, estilo + txt)
 
     cab = f"""[Script Info]
 ScriptType: v4.00+
@@ -323,58 +325,101 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Leg,Inter,{tam},&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,5,3,5,80,80,0,1
-Style: Tit,Inter,48,&H00FFFFFF,&H00FFFFFF,&H00000000,&H78000000,-1,0,0,0,100,100,0,0,1,5,4,8,80,80,0,1
+Style: Base,Inter,60,&H00FFFFFF,&H00FFFFFF,&H00101010,&H64000000,-1,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
+    linhas = [f"Dialogue: {ca},{fx.ts(a)},{fx.ts(b)},Base,,0,0,0,,{tx}" for ca, a, b, tx in sorted(c.ev, key=lambda x: (x[1], x[0]))]
     with open(os.path.join(pasta, "legenda.ass"), "w", encoding="utf-8") as f:
-        f.write(cab + "\n".join(ev) + "\n")
+        f.write(cab + "\n".join(linhas) + "\n")
     os.makedirs(os.path.join(pasta, "fontes"), exist_ok=True)
     for f in glob.glob(os.path.join(FONTES, "*.ttf")):
         shutil.copy(f, os.path.join(pasta, "fontes"))
 
-    # 3. zoom seco nas frases fortes (no tempo novo)
-    zooms = []
-    for z in plano.get("zooms", []):
-        t = float(z[0] if isinstance(z, list) else z)
-        d = float(z[1]) if isinstance(z, list) and len(z) > 1 else 1.4
-        zooms.append((novo(t) - 0.03, novo(t) - 0.03 + d / vel))
-    zexpr = "+".join(f"between(t,{a:.2f},{b:.2f})" for a, b in zooms) or "0"
-    esc_z = float(plano.get("zoom_escala", 1.15))
-    zw, zh = int(W * esc_z) // 2 * 2, int(H * esc_z) // 2 * 2
+    # 5. sons
+    usar_sons = plano.get("sons", True)
+    if usar_sons and c.sons:
+        sn.faixa(c.sons, final, os.path.join(pasta, "sons.wav"), float(plano.get("volume_sons", 0.6)))
+
+    # 6. video: um filtro so
+    entradas = ["-i", video]
+    idx = 1
+    if usar_sons and c.sons:
+        entradas += ["-i", "sons.wav"]
+        i_sons = idx
+        idx += 1
+    congelas = []
+    for k, (a, b, t_orig) in enumerate(c.congela):
+        png = f"congela{k}.png"
+        rodar([ff, "-v", "error", "-y", "-ss", f"{max(0, t_orig):.2f}", "-i", video, "-frames:v", "1",
+               "-vf", ENQUADRAR, os.path.join(pasta, png)])
+        entradas += ["-loop", "1", "-t", f"{final + 1:.2f}", "-i", png]
+        congelas.append((idx, a, b))
+        idx += 1
 
     sel = "+".join(f"between(t,{x:.3f},{y:.3f})" for x, y in fica)
     vel_v = f",setpts=PTS/{vel:.4f}" if vel > 1.0001 else ""
     vel_a = f",atempo={vel:.4f}" if vel > 1.0001 else ""
-    with open(os.path.join(pasta, "sel.txt"), "w") as f:
-        f.write(sel)
-    filtro = (
-        f"[0:v]fps={FPS},{ENQUADRAR},select='{sel}',setpts=N/{FPS}/TB{vel_v},split[b][z];"
-        f"[z]scale={zw}:{zh},crop={W}:{H}:(iw-{W})/2:(ih-{H})*0.42[zz];"
-        f"[b][zz]overlay=0:0:enable='{zexpr}',ass=legenda.ass:fontsdir=fontes,format=yuv420p[v];"
-        f"[0:a]aselect='{sel}',asetpts=N/SR/TB{vel_a},loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[a]"
-    )
+    g = [f"[0:v]fps={FPS},{ENQUADRAR},select='{sel}',setpts=N/{FPS}/TB{vel_v}[v0]"]
+    atual = "v0"
+    if c.zooms:
+        esc_z = max(z[2] for z in c.zooms)
+        zw, zh = int(W * esc_z) // 2 * 2, int(H * esc_z) // 2 * 2
+        g.append(f"[{atual}]split[zb][zz];[zz]scale={zw}:{zh},crop={W}:{H}:(iw-{W})/2:(ih-{H})*0.42[zs];"
+                 f"[zb][zs]overlay=0:0:enable='{uniao([(a, b) for a, b, _ in c.zooms])}'[vz]")
+        atual = "vz"
+    for d in sorted({d for _, _, d in c.descer}):
+        tr = [(a, b) for a, b, dd in c.descer if dd == d]
+        en = uniao(tr)
+        g.append(f"[{atual}]split=3[db][dd][dg];[dg]boxblur=28:2:enable='{en}',eq=brightness=-0.22:enable='{en}'[dfundo];"
+                 f"[dd]crop={W}:{H - d}:0:0[dfrente];[dfundo][dfrente]overlay=0:{d}[ds];"
+                 f"[db][ds]overlay=0:0:enable='{en}'[vd{d}]")
+        atual = f"vd{d}"
+    for k, (i_png, a, b) in enumerate(congelas):
+        g.append(f"[{i_png}:v]setsar=1,format=yuv420p[cg{k}];[{atual}][cg{k}]overlay=0:0:enable='between(t,{a:.2f},{b:.2f})'[vc{k}]")
+        atual = f"vc{k}"
+    extra = []
+    if c.blur:
+        extra.append(f"boxblur=22:2:enable='{uniao(c.blur)}'")
+    for a, b, op in c.escuro:
+        extra.append(f"drawbox=x=0:y=0:w=iw:h=ih:color=black@{op:.2f}:t=fill:enable='between(t,{a:.2f},{b:.2f})'")
+    extra.append("ass=legenda.ass:fontsdir=fontes")
+    extra.append("format=yuv420p")
+    g.append(f"[{atual}]" + ",".join(extra) + "[v]")
+    voz = f"[0:a]aselect='{sel}',asetpts=N/SR/TB{vel_a}"
+    if usar_sons and c.sons:
+        g.append(voz + "[voz]")
+        g.append(f"[{i_sons}:a]aresample=48000,volume=1.0[sfx];[voz]aresample=48000[voz2];"
+                 f"[voz2][sfx]amix=inputs=2:normalize=0:duration=first,loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[a]")
+    else:
+        g.append(voz + ",loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[a]")
+    filtro = ";".join(g)
     with open(os.path.join(pasta, "filtro.txt"), "w") as f:
         f.write(filtro)
+
     base = re.sub(r"[^a-zA-Z0-9]+", "-", os.path.splitext(os.path.basename(video))[0]).strip("-")[:40]
     destino_dir = SAIDA_CHAT if os.path.isdir(os.path.dirname(SAIDA_CHAT)) else pasta
     os.makedirs(destino_dir, exist_ok=True)
     saida = os.path.join(destino_dir, f"{base}-editado.mp4")
-    log(f"montando: {len(fica) - 1} pausas cortadas, velocidade {vel:.2f}x, {len(zooms)} zooms, "
-        f"{dur:.1f}s -> {final:.1f}s")
-    rodar([ff, "-v", "error", "-y", "-i", video, "-filter_complex", filtro,
-           "-map", "[v]", "-map", "[a]", "-r", str(FPS), "-c:v", "libx264", "-preset", "veryfast",
+    for aviso in c.avisos:
+        log("aviso: " + aviso)
+    log(f"montando: {len(fica) - 1} pausas cortadas, velocidade {vel:.2f}x, {len(efs)} efeitos, "
+        f"{len(c.sons)} sons, {dur:.1f}s -> {final:.1f}s")
+    rodar([ff, "-v", "error", "-y", *entradas, "-filter_complex", filtro,
+           "-map", "[v]", "-map", "[a]", "-r", str(FPS), "-t", f"{final:.2f}", "-c:v", "libx264", "-preset", "veryfast",
            "-crf", "21", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", saida], cwd=pasta)
 
-    # 4. conferencia: 4 fotos do arquivo entregue
-    conf = os.path.join(pasta, "conferir.jpg")
-    pts = [0.8, final * 0.33, final * 0.66, max(0.5, final - 1.5)]
+    # 7. conferencia: 1 foto no meio de cada efeito (ate 8) + inicio
+    pts = [0.8] + [round((a + b) / 2, 2) for _, a, b, _ in sorted(c.ev, key=lambda x: x[1]) if b - a > 0.8][::3]
+    pts = sorted(set(min(final - 0.2, p) for p in pts))[:8]
+    for f in glob.glob(os.path.join(pasta, "c*.jpg")):
+        os.remove(f)
     for i, t in enumerate(pts):
         rodar([ff, "-v", "error", "-y", "-ss", f"{t:.2f}", "-i", saida, "-frames:v", "1",
-               "-vf", "scale=270:-2", os.path.join(pasta, f"c{i}.jpg")])
-    rodar([ff, "-v", "error", "-y", "-i", os.path.join(pasta, "c%d.jpg"), "-vf", "tile=4x1", conf])
+               "-vf", "scale=240:-2", os.path.join(pasta, f"c{i}.jpg")])
+    conf = os.path.join(pasta, "conferir.jpg")
+    rodar([ff, "-v", "error", "-y", "-i", os.path.join(pasta, "c%d.jpg"), "-vf", f"tile={len(pts)}x1", conf])
     m, s = divmod(round(duracao(ff, saida)), 60)
     log("pronto")
     print(f"\nVIDEO={saida}\nDURACAO={m}:{s:02d}\nCONFERIR={conf}")
